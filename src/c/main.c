@@ -17,7 +17,7 @@ Layer *idle_create(GRect frame);
 void idle_show(bool show);
 void idle_set_mood(int charging, int battery, int cpu);
 
-#define STATS_MS 10000  // how long stats stay up after a flick or button press
+#define STATS_MS 60000  // how long stats stay up after opening the app, a flick or a button press
 static bool s_idle = true;
 static AppTimer *s_idle_timer;
 static Layer *s_stats, *s_bat_layer;
@@ -357,6 +357,7 @@ static void main_load(Window *w) {
   layer_add_child(root, s_stats);
   steam_status_bar(root);
   layer_add_child(root, idle_create(b));  // on top; dissolves away to reveal the stats
+  wake();  // open on the stats; the sculpture takes over after STATS_MS
 }
 
 // ---- messaging --------------------------------------------------------------

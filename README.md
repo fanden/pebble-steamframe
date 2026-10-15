@@ -9,7 +9,7 @@ Control and monitor your Valve Steam Frame from a Pebble Time 2.
 - **Idle sculpture:** while you're not looking, a tumbling icosahedron in a wire cage, shaded only with
   ordered (Bayer) dithering. Tilt your wrist and the light moves; it turns green while charging, red
   when the battery's low, and spins faster when the Frame is busy. Flick your wrist (or press any
-  button) and the stats dissolve in through the same dither pattern; after 10 s it fades back.
+  button) and the stats dissolve in through the same dither pattern; after a minute it fades back.
 - **Steam look:** Steam's palette and layout (dark header with the blue underline, download-style
   battery bar, stat tiles, friends-list "NOW PLAYING" card, blue focus highlight). Steam's slate
   greys aren't among the Pebble's 64 colors, so they're dithered from the two nearest.
@@ -20,7 +20,7 @@ Control and monitor your Valve Steam Frame from a Pebble Time 2.
 
 | Button | Main screen |
 |---|---|
-| Flick wrist / any button | Show stats (from the idle sculpture) |
+| Flick wrist / any button | Show stats (from the idle sculpture); the app also opens on them |
 | Up / Down | Volume up / down (hold to repeat) |
 | Select | Quick settings menu |
 | Hold Select | Mute toggle |
