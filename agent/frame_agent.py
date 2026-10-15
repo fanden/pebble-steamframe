@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
 """Tiny HTTP agent that runs on the Steam Frame and serves stats/controls to the Pebble app.
 
-Stdlib only (SteamOS ships Python 3.12). Every request needs `Authorization: Bearer <token>`;
-the token is generated on first run into ~/.config/pebble-frame/token.
+Stdlib only (SteamOS ships Python 3.12). The watch finds the agent as frame.local via GET /hello
+and pairs itself with POST /pair, which hands out the token once (trust on first use). Every other
+request needs `Authorization: Bearer <token>`. To pair a different phone, delete
+~/.config/pebble-frame/token.
 """
+import base64
 import glob
 import hmac
 import json
@@ -11,8 +14,11 @@ import os
 import re
 import secrets
 import signal
+import socket
 import subprocess
+import threading
 import time
+import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -20,7 +26,9 @@ PORT = int(os.environ.get("PEBBLE_FRAME_PORT", "8765"))
 TOKEN_FILE = Path.home() / ".config/pebble-frame/token"
 STEAMAPPS = Path.home() / ".local/share/Steam/steamapps"
 VOLUME_STEP = "5%"
-POWER = {"sleep": "suspend", "reboot": "reboot", "poweroff": "poweroff"}
+# Steam does these itself; `systemctl` from outside the session needs interactive auth
+POWER = {"sleep": "SuspendPC", "reboot": "RestartPC", "poweroff": "ShutdownPC"}
+_pair_lock = threading.Lock()
 
 
 def read(path, default=""):
@@ -31,11 +39,38 @@ def read(path, default=""):
 
 
 def token():
-    if not TOKEN_FILE.exists():
+    return read(TOKEN_FILE)
+
+
+def pair():
+    """Create and return the token if nobody has paired yet, else None."""
+    with _pair_lock:
+        if token():
+            return None
         TOKEN_FILE.parent.mkdir(parents=True, exist_ok=True)
+        TOKEN_FILE.touch(mode=0o600)
         TOKEN_FILE.write_text(secrets.token_urlsafe(16))
-        TOKEN_FILE.chmod(0o600)
-    return TOKEN_FILE.read_text().strip()
+        return token()
+
+
+def steam_js(expr):
+    """Fire-and-forget JS in the Steam client's SharedJSContext over its local DevTools port."""
+    pages = json.load(urllib.request.urlopen("http://127.0.0.1:8080/json", timeout=3))
+    url = next(p["webSocketDebuggerUrl"] for p in pages if p.get("title") == "SharedJSContext")
+    hostport, path = url.split("://", 1)[1].split("/", 1)
+    host, port = hostport.rsplit(":", 1)
+    with socket.create_connection((host, int(port)), timeout=5) as sock:
+        key = base64.b64encode(os.urandom(16)).decode()
+        sock.sendall((f"GET /{path} HTTP/1.1\r\nHost: {hostport}\r\nUpgrade: websocket\r\n"
+                      f"Connection: Upgrade\r\nSec-WebSocket-Key: {key}\r\nSec-WebSocket-Version: 13\r\n\r\n").encode())
+        if b" 101 " not in sock.recv(4096).split(b"\r\n")[0]:
+            raise OSError("DevTools refused the WebSocket upgrade")
+        data = json.dumps({"id": 1, "method": "Runtime.evaluate", "params": {"expression": expr}}).encode()
+        mask = os.urandom(4)
+        n = len(data)  # masked text frame; payloads here are always < 64 KiB
+        head = bytes([0x81, 0x80 | n]) if n < 126 else bytes([0x81, 0x80 | 126]) + n.to_bytes(2, "big")
+        sock.sendall(head + mask + bytes(b ^ mask[i % 4] for i, b in enumerate(data)))
+        sock.recv(4096)  # wait for the reply so the call isn't dropped when we close
 
 
 def battery():
@@ -171,9 +206,7 @@ def act(action, arg):
                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     elif action in POWER:
         # delayed so the HTTP reply gets out before the Frame goes down
-        # relies on logind allowing the user manager to suspend (it allows inhibit locks,
-        # per frame-control's notes); fall back to SteamClient.System.SuspendPC() over DevTools if not
-        subprocess.Popen(["sh", "-c", f"sleep 1; systemctl {POWER[action]}"], start_new_session=True)
+        threading.Timer(1, steam_js, [f"SteamClient.System.{POWER[action]}()"]).start()
     else:
         return False
     return True
@@ -190,12 +223,15 @@ class Handler(BaseHTTPRequestHandler):
 
     def authed(self):
         given = self.headers.get("Authorization", "").removeprefix("Bearer ").encode()
-        if hmac.compare_digest(given, TOKEN.encode()):
+        current = token().encode()
+        if current and hmac.compare_digest(given, current):
             return True
         self.reply(401, {"error": "bad token"})
         return False
 
     def do_GET(self):
+        if self.path == "/hello":  # discovery probe, no auth
+            return self.reply(200, {"app": "pebble-frame", "paired": bool(token())})
         if not self.authed():
             return
         if self.path == "/stats":
@@ -206,6 +242,9 @@ class Handler(BaseHTTPRequestHandler):
             self.reply(404, {"error": "not found"})
 
     def do_POST(self):
+        if self.path == "/pair":
+            t = pair()
+            return self.reply(200, {"token": t}) if t else self.reply(403, {"error": "already paired"})
         if not self.authed():
             return
         # /action/<name>[/<arg>]
@@ -221,6 +260,5 @@ class Handler(BaseHTTPRequestHandler):
 
 
 if __name__ == "__main__":
-    TOKEN = token()
-    print(f"pebble-frame agent on :{PORT}, token: {TOKEN}", flush=True)
+    print(f"pebble-frame agent on :{PORT}, {'paired' if token() else 'waiting to pair'}", flush=True)
     ThreadingHTTPServer(("0.0.0.0", PORT), Handler).serve_forever()

@@ -35,8 +35,7 @@
       "BatTemp",
       "Health",
       "Volts",
-      "Host",
-      "Token"
+      "Host"
     ],
     "resources": {
       "media": []

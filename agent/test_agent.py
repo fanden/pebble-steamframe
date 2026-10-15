@@ -8,4 +8,15 @@ acf = '"AppState"\n{\n\t"appid"\t\t"620"\n\t"name"\t\t"Portal 2"\n\t"LastPlayed"
 assert acf_value(acf, "appid") == "620"
 assert acf_value(acf, "name") == "Portal 2"
 assert acf_value(acf, "missing") == ""
-print("ok")
+
+
+# pairing hands out the token exactly once
+import tempfile
+from pathlib import Path
+import frame_agent
+frame_agent.TOKEN_FILE = Path(tempfile.mkdtemp()) / "sub/token"
+t = frame_agent.pair()
+assert t and frame_agent.token() == t
+assert frame_agent.pair() is None
+assert oct(frame_agent.TOKEN_FILE.stat().st_mode & 0o777) == "0o600"
+print("pair ok")

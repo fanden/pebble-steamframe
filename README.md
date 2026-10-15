@@ -24,8 +24,10 @@ Pebble ⇄ Bluetooth ⇄ phone (PebbleKit JS) ⇄ Wi-Fi/HTTP ⇄ agent on the Fr
 ```
 
 The agent ([agent/frame_agent.py](agent/frame_agent.py)) is one stdlib-only Python file running as a
-systemd user service on the Frame. It reads `/sys` and `/proc`, controls volume with `wpctl`, and
-launches games through `steam steam://rungameid/<id>`. Every request needs a token.
+systemd user service on the Frame. It reads `/sys` and `/proc`, controls volume with `wpctl`,
+launches games through `steam steam://rungameid/<id>`, and asks Steam itself to sleep/restart/power
+off (`SteamClient.System.*` over the Steam UI's local DevTools port, since `systemctl` from outside
+the session needs a password). Everything except discovery and the one-time pairing needs the key.
 
 ## Setup
 
@@ -37,8 +39,7 @@ Open a terminal on the Frame (SSH, or Desktop Mode → Konsole) and run:
 curl -LsSf https://raw.githubusercontent.com/OWNER/pebble-steamframe/main/agent/install.sh | sh
 ```
 
-It installs to `~/.local/share/pebble-frame` (no sudo, survives SteamOS updates) and prints the
-address and token. Show the token again with `cat ~/.config/pebble-frame/token`.
+It installs to `~/.local/share/pebble-frame` (no sudo, survives SteamOS updates).
 
 Uninstall: `systemctl --user disable --now pebble-frame && rm -rf ~/.local/share/pebble-frame ~/.config/systemd/user/pebble-frame.service`
 
@@ -54,10 +55,14 @@ pebble build
 pebble install --phone <phone-ip>
 ```
 
-Then open the app's settings in the Pebble phone app and enter the address (`192.168.x.x:8765`) and token.
+Open the app on the watch. That's it: it looks for the Frame as `frame.local` (SteamOS's default
+hostname, over mDNS) or `frame` (Tailscale MagicDNS), then pairs. The first phone to ask gets the
+key; after that the agent refuses new pairings.
 
-Phone and Frame need to be on the same network. Away from home, put both on Tailscale and use the
-Frame's Tailscale name.
+- **Renamed your Frame?** Put its address in the app's settings on the phone (optional field).
+- **New phone / "Frame paired to another phone"?** On the Frame: `rm ~/.config/pebble-frame/token`,
+  then open the app again.
+- Away from home, put phone and Frame on Tailscale.
 
 ## Notes
 

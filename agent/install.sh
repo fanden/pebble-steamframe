@@ -28,8 +28,6 @@ systemctl --user daemon-reload
 systemctl --user enable --now pebble-frame.service
 sleep 1
 
-IP=$(ip -4 -o addr show scope global | awk '{print $4}' | cut -d/ -f1 | head -n1)
 echo
-echo "Agent running. In the Pebble app settings enter:"
-echo "  Frame address: $IP:8765"
-echo "  Token:         $(cat "$HOME/.config/pebble-frame/token")"
+echo "Agent running. Open Steam Frame on your Pebble: it finds this Frame (frame.local) and pairs by itself."
+echo "Phone and Frame need to be on the same network (or both on Tailscale)."
