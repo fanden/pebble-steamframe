@@ -1,0 +1,45 @@
+{
+  "name": "pebble-steamframe",
+  "author": "alfred",
+  "version": "1.0.0",
+  "keywords": ["pebble-app"],
+  "private": true,
+  "dependencies": {
+    "pebble-clay": "^1.0.4"
+  },
+  "pebble": {
+    "displayName": "Steam Frame",
+    "uuid": "6f1c2a9e-5b3d-4e8a-9c7f-2d4b8e1a0f53",
+    "sdkVersion": "3",
+    "enableMultiJS": true,
+    "targetPlatforms": ["emery"],
+    "capabilities": ["configurable"],
+    "watchapp": {
+      "watchface": false
+    },
+    "messageKeys": [
+      "Battery",
+      "Charging",
+      "Watts",
+      "Mins",
+      "CpuTemp",
+      "Cpu",
+      "Mem",
+      "Volume",
+      "Muted",
+      "Game",
+      "Status",
+      "Action",
+      "GameNames",
+      "Launch",
+      "BatTemp",
+      "Health",
+      "Volts",
+      "Host",
+      "Token"
+    ],
+    "resources": {
+      "media": []
+    }
+  }
+}
