@@ -11,13 +11,84 @@ static struct {
 } s;
 
 static Window *s_main, *s_menu_win, *s_bat_win, *s_games_win;
-static TextLayer *s_pct, *s_power, *s_details, *s_game, *s_bat_text;
+
+// idle.c
+Layer *idle_create(GRect frame);
+void idle_show(bool show);
+void idle_set_mood(int charging, int battery, int cpu);
+
+#define STATS_MS 10000  // how long stats stay up after a flick or button press
+static bool s_idle = true;
+static AppTimer *s_idle_timer;
+static Layer *s_stats, *s_bat_layer;
 static SimpleMenuLayer *s_menu, *s_games;
 
-static char s_pct_buf[8], s_power_buf[48], s_details_buf[96], s_bat_buf[200];
 static char s_names_buf[MAX_GAMES * 32];
 static SimpleMenuItem s_game_items[MAX_GAMES];
 static SimpleMenuSection s_games_section;
+
+// ---- Steam look -------------------------------------------------------------
+// Steam's palette on Pebble's 64 colors. Its in-between slates (#1b2838 body, #2a475e panels) aren't
+// in the palette, so they're 50% checkerboard dithers of the two nearest colors.
+#define STEAM_TEXT GColorWhite
+#define STEAM_SUBTEXT GColorLightGray      // #c7d5e0 / #8f98a0
+#define STEAM_ACCENT GColorPictonBlue      // #66c0f4
+#define STEAM_FOCUS GColorVividCerulean    // #1a9fff, focus + progress
+#define STEAM_INGAME GColorInchworm        // friends list "in-game" green
+#define STEAM_PLAY GColorKellyGreen        // Play button green
+#define STEAM_ERROR GColorSunsetOrange     // #c15755-ish
+#define HEADER_H 40                        // status bar (16) + title row
+
+static void dither_rect(GContext *ctx, GRect r, GColor a, GColor b) {
+  GBitmap *fb = graphics_capture_frame_buffer(ctx);
+  if (!fb) return;
+  for (int y = r.origin.y; y < r.origin.y + r.size.h; y++) {
+    GBitmapDataRowInfo row = gbitmap_get_data_row_info(fb, y);
+    int x0 = r.origin.x > row.min_x ? r.origin.x : row.min_x;
+    int x1 = r.origin.x + r.size.w - 1 < row.max_x ? r.origin.x + r.size.w - 1 : row.max_x;
+    for (int x = x0; x <= x1; x++) row.data[x] = ((x + y) & 1) ? a.argb : b.argb;
+  }
+  graphics_release_frame_buffer(ctx, fb);
+}
+
+static void steam_body(GContext *ctx, GRect r) { dither_rect(ctx, r, GColorBlack, GColorOxfordBlue); }
+static void steam_panel(GContext *ctx, GRect r) { dither_rect(ctx, r, GColorDarkGray, GColorMidnightGreen); }
+
+static void draw_text(GContext *ctx, const char *txt, const char *font, GRect r, GColor c, GTextAlignment a) {
+  graphics_context_set_text_color(ctx, c);
+  graphics_draw_text(ctx, txt, fonts_get_system_font(font), r, GTextOverflowModeTrailingEllipsis, a, NULL);
+}
+
+// Title row under the status bar with Steam's thin blue underline; returns where content starts
+static int draw_header(GContext *ctx, GRect b, const char *title) {
+  graphics_context_set_fill_color(ctx, GColorBlack);
+  graphics_fill_rect(ctx, GRect(0, 16, b.size.w, HEADER_H - 16), 0, GCornerNone);
+  draw_text(ctx, title, FONT_KEY_GOTHIC_18_BOLD, GRect(8, 15, b.size.w - 16, 22), STEAM_TEXT, GTextAlignmentLeft);
+
+  bool online = s.have && !s.status[0];
+  draw_text(ctx, online ? "ONLINE" : "OFFLINE", FONT_KEY_GOTHIC_14, GRect(0, 19, b.size.w - 18, 16),
+            online ? STEAM_ACCENT : STEAM_SUBTEXT, GTextAlignmentRight);
+  graphics_context_set_fill_color(ctx, online ? STEAM_ACCENT : GColorDarkGray);
+  graphics_fill_circle(ctx, GPoint(b.size.w - 11, 28), 3);
+
+  graphics_context_set_fill_color(ctx, STEAM_FOCUS);
+  graphics_fill_rect(ctx, GRect(0, HEADER_H, b.size.w, 1), 0, GCornerNone);
+  steam_body(ctx, GRect(0, HEADER_H + 1, b.size.w, b.size.h - HEADER_H - 1));
+  return HEADER_H + 1;
+}
+
+static StatusBarLayer *steam_status_bar(Layer *root) {
+  StatusBarLayer *bar = status_bar_layer_create();
+  status_bar_layer_set_colors(bar, GColorBlack, STEAM_SUBTEXT);
+  layer_add_child(root, status_bar_layer_get_layer(bar));
+  return bar;
+}
+
+static void steam_menu_colors(SimpleMenuLayer *m) {
+  MenuLayer *ml = simple_menu_layer_get_menu_layer(m);
+  menu_layer_set_normal_colors(ml, GColorBlack, STEAM_TEXT);
+  menu_layer_set_highlight_colors(ml, STEAM_FOCUS, STEAM_TEXT);
+}
 
 // ---- helpers ----------------------------------------------------------------
 
@@ -29,64 +100,85 @@ static void send_action(const char *action) {
 }
 
 static void fmt_mins(char *buf, size_t n, int mins) {
-  if (mins >= 60) snprintf(buf, n, "%dh%02dm", mins / 60, mins % 60);
+  if (!mins) snprintf(buf, n, "—");
+  else if (mins >= 60) snprintf(buf, n, "%dh%02dm", mins / 60, mins % 60);
   else snprintf(buf, n, "%dm", mins);
 }
 
 static GColor battery_color(void) {
-  if (s.charging) return GColorMalachite;
-  if (s.battery <= 15) return GColorRed;
-  if (s.battery <= 35) return GColorChromeYellow;
-  return GColorWhite;
+  if (s.charging) return STEAM_PLAY;
+  if (s.battery <= 15) return STEAM_ERROR;
+  return STEAM_FOCUS;
 }
 
 static void render(void) {
-  if (!s.have) {
-    text_layer_set_text(s_pct, "--%");
-    text_layer_set_text(s_power, "");
-    text_layer_set_text(s_details, "Connecting…");
-    text_layer_set_text(s_game, s.status);
-    return;
-  }
-
-  snprintf(s_pct_buf, sizeof(s_pct_buf), "%d%%", s.battery);
-  text_layer_set_text(s_pct, s_pct_buf);
-  text_layer_set_text_color(s_pct, battery_color());
-
-  char t[16] = "";
-  if (s.mins) fmt_mins(t, sizeof(t), s.mins);
-  snprintf(s_power_buf, sizeof(s_power_buf), "%s %d.%dW%s%s%s",
-           s.charging ? "+" : "-", s.watts10 / 10, s.watts10 % 10,
-           s.mins ? " · " : "", t, s.mins ? (s.charging ? " to full" : " left") : "");
-  text_layer_set_text(s_power, s_power_buf);
-
-  snprintf(s_details_buf, sizeof(s_details_buf), "CPU %d%%  %d°C\nRAM %d%%\nVol %d%%%s",
-           s.cpu, s.cpu_temp, s.mem, s.volume, s.muted ? " (muted)" : "");
-  text_layer_set_text(s_details, s_details_buf);
-
-  // An error/status line wins over the game title
-  text_layer_set_text(s_game, s.status[0] ? s.status : (s.game[0] ? s.game : "No game running"));
-
-  if (s_bat_text) {
-    char t2[16] = "—";
-    if (s.mins) fmt_mins(t2, sizeof(t2), s.mins);
-    snprintf(s_bat_buf, sizeof(s_bat_buf),
-             "Charge   %d%%\nState    %s\nPower    %d.%d W\n%s %s\nVoltage  %d.%02d V\nTemp     %d°C\nHealth   %d%%",
-             s.battery, s.charging ? "Charging" : "On battery", s.watts10 / 10, s.watts10 % 10,
-             s.charging ? "To full " : "Left    ", t2, s.volts100 / 100, s.volts100 % 100,
-             s.bat_temp, s.health);
-    text_layer_set_text(s_bat_text, s_bat_buf);
-  }
+  if (s_stats) layer_mark_dirty(s_stats);
+  if (s_bat_layer) layer_mark_dirty(s_bat_layer);
 }
 
-static TextLayer *text(Layer *root, GRect r, const char *font, GTextAlignment align) {
-  TextLayer *t = text_layer_create(r);
-  text_layer_set_background_color(t, GColorClear);
-  text_layer_set_text_color(t, GColorWhite);
-  text_layer_set_font(t, fonts_get_system_font(font));
-  text_layer_set_text_alignment(t, align);
-  layer_add_child(root, text_layer_get_layer(t));
-  return t;
+// ---- stats screen -----------------------------------------------------------
+
+static void tile(GContext *ctx, GRect r, const char *label, const char *value, GColor value_color) {
+  steam_panel(ctx, r);
+  draw_text(ctx, label, FONT_KEY_GOTHIC_14, GRect(r.origin.x + 5, r.origin.y + 1, r.size.w - 6, 16),
+            STEAM_SUBTEXT, GTextAlignmentLeft);
+  draw_text(ctx, value, FONT_KEY_GOTHIC_24_BOLD, GRect(r.origin.x + 5, r.origin.y + 14, r.size.w - 6, 28),
+            value_color, GTextAlignmentLeft);
+}
+
+static void stats_update(Layer *layer, GContext *ctx) {
+  GRect b = layer_get_bounds(layer);
+  int w = b.size.w, y = draw_header(ctx, b, "STEAM FRAME");
+  char buf[32], buf2[16];
+
+  // Battery: big number, power + time on the right, Steam download-style bar underneath
+  if (s.have) snprintf(buf, sizeof(buf), "%d%%", s.battery);
+  draw_text(ctx, s.have ? buf : "--%", FONT_KEY_BITHAM_42_BOLD, GRect(6, y - 2, 110, 50), STEAM_TEXT,
+            GTextAlignmentLeft);
+  if (s.have) {
+    snprintf(buf, sizeof(buf), "%s%d.%d W", s.charging ? "+" : "−", s.watts10 / 10, s.watts10 % 10);
+    draw_text(ctx, buf, FONT_KEY_GOTHIC_24_BOLD, GRect(110, y + 4, w - 118, 28), STEAM_TEXT, GTextAlignmentRight);
+    fmt_mins(buf2, sizeof(buf2), s.mins);
+    snprintf(buf, sizeof(buf), "%s %s", buf2, s.mins ? (s.charging ? "to full" : "left") : "");
+    draw_text(ctx, buf, FONT_KEY_GOTHIC_14, GRect(100, y + 30, w - 108, 18), STEAM_SUBTEXT, GTextAlignmentRight);
+  }
+  GRect bar = GRect(8, y + 52, w - 16, 7);
+  graphics_context_set_fill_color(ctx, GColorDarkGray);
+  graphics_fill_rect(ctx, bar, 0, GCornerNone);
+  int fill = s.have ? bar.size.w * s.battery / 100 : 0;
+  graphics_context_set_fill_color(ctx, battery_color());
+  graphics_fill_rect(ctx, GRect(bar.origin.x, bar.origin.y, fill, bar.size.h), 0, GCornerNone);
+  graphics_context_set_fill_color(ctx, s.charging ? GColorInchworm : STEAM_ACCENT);  // Steam's top gloss
+  graphics_fill_rect(ctx, GRect(bar.origin.x, bar.origin.y, fill, 2), 0, GCornerNone);
+
+  // Three stat tiles
+  int ty = y + 66, tw = (w - 32) / 3;
+  if (s.have) snprintf(buf, sizeof(buf), "CPU %d°", s.cpu_temp);
+  if (s.have) snprintf(buf2, sizeof(buf2), "%d%%", s.cpu);
+  tile(ctx, GRect(8, ty, tw, 44), s.have ? buf : "CPU", s.have ? buf2 : "--", STEAM_TEXT);
+  if (s.have) snprintf(buf2, sizeof(buf2), "%d%%", s.mem);
+  tile(ctx, GRect(16 + tw, ty, tw, 44), "RAM", s.have ? buf2 : "--", STEAM_TEXT);
+  if (s.have) snprintf(buf2, sizeof(buf2), "%d%%", s.volume);
+  tile(ctx, GRect(24 + 2 * tw, ty, tw, 44), "VOLUME", s.muted ? "MUTE" : s.have ? buf2 : "--",
+       s.muted ? STEAM_ERROR : STEAM_TEXT);
+
+  // Now playing card, like the friends list: green bar + "NOW PLAYING" when in game
+  GRect card = GRect(8, ty + 52, w - 16, b.size.h - ty - 58);
+  steam_panel(ctx, card);
+  bool playing = s.game[0] && !s.status[0];
+  graphics_context_set_fill_color(ctx, s.status[0] ? STEAM_ERROR : playing ? STEAM_PLAY : GColorDarkGray);
+  graphics_fill_rect(ctx, GRect(card.origin.x, card.origin.y, 3, card.size.h), 0, GCornerNone);
+  GRect label = GRect(card.origin.x + 9, card.origin.y + 1, card.size.w - 12, 16);
+  GRect body = GRect(card.origin.x + 9, card.origin.y + 15, card.size.w - 12, card.size.h - 16);
+  if (s.status[0]) {
+    draw_text(ctx, "STATUS", FONT_KEY_GOTHIC_14_BOLD, label, STEAM_ERROR, GTextAlignmentLeft);
+    draw_text(ctx, s.status, FONT_KEY_GOTHIC_18, body, STEAM_TEXT, GTextAlignmentLeft);
+  } else {
+    draw_text(ctx, playing ? "NOW PLAYING" : "NOT IN GAME", FONT_KEY_GOTHIC_14_BOLD, label,
+              playing ? STEAM_INGAME : STEAM_SUBTEXT, GTextAlignmentLeft);
+    draw_text(ctx, playing ? s.game : s.have ? "Steam Frame idle" : "Connecting…", FONT_KEY_GOTHIC_24_BOLD,
+              body, playing ? STEAM_TEXT : STEAM_SUBTEXT, GTextAlignmentLeft);
+  }
 }
 
 // ---- games window -----------------------------------------------------------
@@ -112,9 +204,10 @@ static void games_load(Window *w) {
     *nl = '\0';
     p = nl + 1;
   }
-  s_games_section = (SimpleMenuSection){ .title = "Launch game", .items = s_game_items, .num_items = n };
+  s_games_section = (SimpleMenuSection){ .title = "LIBRARY", .items = s_game_items, .num_items = n };
   Layer *root = window_get_root_layer(w);
   s_games = simple_menu_layer_create(layer_get_bounds(root), w, &s_games_section, 1, NULL);
+  steam_menu_colors(s_games);
   layer_add_child(root, simple_menu_layer_get_layer(s_games));
 }
 
@@ -124,21 +217,44 @@ static void games_unload(Window *w) {
 
 // ---- battery window ---------------------------------------------------------
 
-static TextLayer *s_bat_title;
+static StatusBarLayer *s_bat_bar;
+
+static void bat_update(Layer *layer, GContext *ctx) {
+  GRect b = layer_get_bounds(layer);
+  int y = draw_header(ctx, b, "BATTERY") + 4;
+  char v[7][20];
+  snprintf(v[0], 20, "%d%%", s.battery);
+  snprintf(v[1], 20, "%s", s.charging ? "Charging" : "On battery");
+  snprintf(v[2], 20, "%d.%d W", s.watts10 / 10, s.watts10 % 10);
+  fmt_mins(v[3], 20, s.mins);
+  snprintf(v[4], 20, "%d.%02d V", s.volts100 / 100, s.volts100 % 100);
+  snprintf(v[5], 20, "%d°C", s.bat_temp);
+  snprintf(v[6], 20, "%d%%", s.health);
+  const char *labels[7] = { "Charge", "State", "Power", s.charging ? "Time to full" : "Time left",
+                            "Voltage", "Temperature", "Health" };
+  for (int i = 0; i < 7; i++, y += 26) {
+    if (i) {
+      graphics_context_set_fill_color(ctx, GColorDarkGray);
+      graphics_fill_rect(ctx, GRect(10, y - 2, b.size.w - 20, 1), 0, GCornerNone);
+    }
+    draw_text(ctx, labels[i], FONT_KEY_GOTHIC_18, GRect(10, y, 110, 22), STEAM_SUBTEXT, GTextAlignmentLeft);
+    draw_text(ctx, s.have ? v[i] : "--", FONT_KEY_GOTHIC_18_BOLD, GRect(90, y, b.size.w - 100, 22),
+              i == 0 ? battery_color() : STEAM_TEXT, GTextAlignmentRight);
+  }
+}
 
 static void bat_load(Window *w) {
   Layer *root = window_get_root_layer(w);
-  GRect b = layer_get_bounds(root);
-  s_bat_title = text(root, GRect(0, 4, b.size.w, 30), FONT_KEY_GOTHIC_24_BOLD, GTextAlignmentCenter);
-  text_layer_set_text(s_bat_title, "Battery");
-  s_bat_text = text(root, GRect(10, 38, b.size.w - 20, b.size.h - 40), FONT_KEY_GOTHIC_24, GTextAlignmentLeft);
-  render();
+  s_bat_layer = layer_create(layer_get_bounds(root));
+  layer_set_update_proc(s_bat_layer, bat_update);
+  layer_add_child(root, s_bat_layer);
+  s_bat_bar = steam_status_bar(root);
 }
 
 static void bat_unload(Window *w) {
-  text_layer_destroy(s_bat_title);
-  text_layer_destroy(s_bat_text);
-  s_bat_text = NULL;  // render() skips the battery window while it's closed
+  status_bar_layer_destroy(s_bat_bar);
+  layer_destroy(s_bat_layer);
+  s_bat_layer = NULL;
 }
 
 // ---- menu window ------------------------------------------------------------
@@ -189,11 +305,12 @@ static void menu_load(Window *w) {
   s_power_items[P_SLEEP] = (SimpleMenuItem){ .title = "Sleep", .callback = power_selected };
   s_power_items[P_REBOOT] = (SimpleMenuItem){ .title = "Restart", .callback = power_selected };
   s_power_items[P_POWEROFF] = (SimpleMenuItem){ .title = "Power off", .callback = power_selected };
-  s_sections[0] = (SimpleMenuSection){ .title = "Quick settings", .items = s_quick_items, .num_items = M_COUNT_QUICK };
-  s_sections[1] = (SimpleMenuSection){ .title = "Power", .items = s_power_items, .num_items = P_COUNT };
+  s_sections[0] = (SimpleMenuSection){ .title = "QUICK SETTINGS", .items = s_quick_items, .num_items = M_COUNT_QUICK };
+  s_sections[1] = (SimpleMenuSection){ .title = "POWER", .items = s_power_items, .num_items = P_COUNT };
 
   Layer *root = window_get_root_layer(w);
   s_menu = simple_menu_layer_create(layer_get_bounds(root), w, s_sections, 2, NULL);
+  steam_menu_colors(s_menu);
   layer_add_child(root, simple_menu_layer_get_layer(s_menu));
 }
 
@@ -203,10 +320,27 @@ static void menu_unload(Window *w) {
 
 // ---- main window ------------------------------------------------------------
 
-static void up_click(ClickRecognizerRef r, void *ctx) { send_action("vol_up"); }
-static void down_click(ClickRecognizerRef r, void *ctx) { send_action("vol_down"); }
-static void select_click(ClickRecognizerRef r, void *ctx) { window_stack_push(s_menu_win, true); }
-static void select_long(ClickRecognizerRef r, void *ctx) { send_action("mute"); vibes_short_pulse(); }
+static void go_idle(void *ctx) {
+  s_idle_timer = NULL;
+  s_idle = true;
+  idle_show(true);
+}
+
+// Shows the stats; returns true if they were hidden, so the press only wakes
+static bool wake(void) {
+  bool was_idle = s_idle;
+  s_idle = false;
+  idle_show(false);
+  if (!app_timer_reschedule(s_idle_timer, STATS_MS)) s_idle_timer = app_timer_register(STATS_MS, go_idle, NULL);
+  return was_idle;
+}
+
+static void tap(AccelAxisType axis, int32_t direction) { wake(); }
+
+static void up_click(ClickRecognizerRef r, void *ctx) { if (!wake()) send_action("vol_up"); }
+static void down_click(ClickRecognizerRef r, void *ctx) { if (!wake()) send_action("vol_down"); }
+static void select_click(ClickRecognizerRef r, void *ctx) { if (!wake()) window_stack_push(s_menu_win, true); }
+static void select_long(ClickRecognizerRef r, void *ctx) { wake(); send_action("mute"); vibes_short_pulse(); }
 
 static void click_config(void *ctx) {
   window_single_repeating_click_subscribe(BUTTON_ID_UP, 200, up_click);
@@ -218,20 +352,11 @@ static void click_config(void *ctx) {
 static void main_load(Window *w) {
   Layer *root = window_get_root_layer(w);
   GRect b = layer_get_bounds(root);
-  int wd = b.size.w;
-
-  StatusBarLayer *bar = status_bar_layer_create();
-  status_bar_layer_set_colors(bar, GColorOxfordBlue, GColorWhite);
-  layer_add_child(root, status_bar_layer_get_layer(bar));
-
-  text_layer_set_text(text(root, GRect(0, 18, wd, 24), FONT_KEY_GOTHIC_18_BOLD, GTextAlignmentCenter),
-                      "STEAM FRAME");
-  s_pct = text(root, GRect(0, 36, wd, 50), FONT_KEY_BITHAM_42_BOLD, GTextAlignmentCenter);
-  s_power = text(root, GRect(0, 88, wd, 28), FONT_KEY_GOTHIC_24_BOLD, GTextAlignmentCenter);
-  s_details = text(root, GRect(12, 118, wd - 24, 72), FONT_KEY_GOTHIC_18, GTextAlignmentLeft);
-  s_game = text(root, GRect(6, b.size.h - 34, wd - 12, 30), FONT_KEY_GOTHIC_18_BOLD, GTextAlignmentCenter);
-  text_layer_set_text_color(s_game, GColorPictonBlue);
-  render();
+  s_stats = layer_create(b);
+  layer_set_update_proc(s_stats, stats_update);
+  layer_add_child(root, s_stats);
+  steam_status_bar(root);
+  layer_add_child(root, idle_create(b));  // on top; dissolves away to reveal the stats
 }
 
 // ---- messaging --------------------------------------------------------------
@@ -265,6 +390,7 @@ static void inbox(DictionaryIterator *it, void *ctx) {
     s.mem = get_int(it, MESSAGE_KEY_Mem, 0);
     s.volume = get_int(it, MESSAGE_KEY_Volume, 0);
     s.muted = get_int(it, MESSAGE_KEY_Muted, 0);
+    idle_set_mood(s.charging, s.battery, s.cpu);
     if ((t = dict_find(it, MESSAGE_KEY_Game))) strncpy(s.game, t->value->cstring, sizeof(s.game) - 1);
   }
   render();
@@ -278,14 +404,15 @@ static Window *make_window(WindowHandlers h, GColor bg) {
 }
 
 int main(void) {
-  s_main = make_window((WindowHandlers){ .load = main_load }, GColorOxfordBlue);
+  s_main = make_window((WindowHandlers){ .load = main_load }, GColorBlack);
   window_set_click_config_provider(s_main, click_config);
-  s_menu_win = make_window((WindowHandlers){ .load = menu_load, .unload = menu_unload }, GColorWhite);
-  s_bat_win = make_window((WindowHandlers){ .load = bat_load, .unload = bat_unload }, GColorOxfordBlue);
-  s_games_win = make_window((WindowHandlers){ .load = games_load, .unload = games_unload }, GColorWhite);
+  s_menu_win = make_window((WindowHandlers){ .load = menu_load, .unload = menu_unload }, GColorBlack);
+  s_bat_win = make_window((WindowHandlers){ .load = bat_load, .unload = bat_unload }, GColorBlack);
+  s_games_win = make_window((WindowHandlers){ .load = games_load, .unload = games_unload }, GColorBlack);
 
   app_message_register_inbox_received(inbox);
   app_message_open(1024, 64);
+  accel_tap_service_subscribe(tap);
   window_stack_push(s_main, true);
   app_event_loop();
   // windows/layers are freed by the OS on app exit
