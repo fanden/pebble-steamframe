@@ -1,9 +1,9 @@
 #!/bin/sh
 # Run on the Steam Frame (SSH or Desktop Mode → Konsole). Installs into ~ only; no sudo.
-#   curl -LsSf https://raw.githubusercontent.com/OWNER/pebble-steamframe/main/agent/install.sh | sh
+#   curl -LsSf https://raw.githubusercontent.com/fanden/pebble-steamframe/main/agent/install.sh | sh
 set -e
 DIR="$HOME/.local/share/pebble-frame"
-REPO="${REPO:-https://raw.githubusercontent.com/OWNER/pebble-steamframe/main}"
+REPO="${REPO:-https://raw.githubusercontent.com/fanden/pebble-steamframe/main}"
 mkdir -p "$DIR" "$HOME/.config/systemd/user"
 
 if [ -f "$(dirname "$0")/frame_agent.py" ]; then

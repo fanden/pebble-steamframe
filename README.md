@@ -44,24 +44,31 @@ the session needs a password). Everything except discovery and the one-time pair
 Open a terminal on the Frame (SSH, or Desktop Mode → Konsole) and run:
 
 ```sh
-curl -LsSf https://raw.githubusercontent.com/OWNER/pebble-steamframe/main/agent/install.sh | sh
+curl -LsSf https://raw.githubusercontent.com/fanden/pebble-steamframe/main/agent/install.sh | sh
 ```
 
-It installs to `~/.local/share/pebble-frame` (no sudo, survives SteamOS updates).
+It installs to `~/.local/share/pebble-frame` (no sudo, survives SteamOS updates) and starts on boot.
+Prefer not to pipe into a shell? Copy the `agent/` folder to the Frame and run `sh install.sh` from it.
 
 Uninstall: `systemctl --user disable --now pebble-frame && rm -rf ~/.local/share/pebble-frame ~/.config/systemd/user/pebble-frame.service`
 
 ### 2. App on the watch
 
-Download `pebble-steamframe.pbw` from the [latest release](../../releases/latest) and open it with the
-Pebble app on your phone, or build it yourself:
+Build it (needs the [Pebble SDK](https://developer.repebble.com/sdk/)):
 
 ```sh
 uv tool install pebble-tool
 pebble sdk install latest
 pebble build
-pebble install --phone <phone-ip>
 ```
+
+Then get `build/pebble-steamframe.pbw` onto the watch, either way works:
+
+- **Same network:** turn on Developer Connection in the Pebble phone app, then
+  `pebble install --phone <phone-ip>`.
+- **From your phone, anywhere:** with the computer and phone on Tailscale, run
+  `python3 tools/sideload.py` and open the address it prints on the phone. Tap **Download .pbw** and
+  open the file with the Pebble app, or tap **Push** to install over Developer Connection.
 
 Open the app on the watch. That's it: it looks for the Frame as `frame.local` (SteamOS's default
 hostname, over mDNS) or `frame` (Tailscale MagicDNS), then pairs. The first phone to ask gets the
@@ -72,10 +79,21 @@ key; after that the agent refuses new pairings.
   then open the app again.
 - Away from home, put phone and Frame on Tailscale.
 
+## Repo layout
+
+| Path | What |
+|---|---|
+| `src/c/main.c` | Watch UI: stats, battery details, menus |
+| `src/c/idle.c` | Idle sculpture and the dither dissolve |
+| `src/pkjs/` | Phone side: finds the Frame, pairs, polls, relays actions |
+| `agent/` | Agent for the Frame, its installer and a self-check |
+| `tools/sideload.py` | Install page for your phone over Tailscale |
+
 ## Notes
 
 - Unofficial. Built on what other Frame projects found ([frame-control](https://github.com/saphid/frame-control),
   [frame-perf-overlay](https://github.com/sasaken1102r/frame-perf-overlay)); a SteamOS update can move things.
 - Once the Frame sleeps the agent can't wake it; the watch shows "Can't reach Frame".
 - The game list only covers the internal Steam library.
-- Run the agent's check with `cd agent && python3 test_agent.py`.
+- Run the agent's self-check with `cd agent && python3 test_agent.py`.
+- Built for the Pebble Time 2 (`emery`). Other watches aren't targeted.
